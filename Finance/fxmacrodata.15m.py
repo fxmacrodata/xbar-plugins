@@ -75,13 +75,14 @@ def get_json(path):
         "Accept": "application/json",
         "User-Agent": "xbar-fxmacrodata/1.0",
     }
-    if API_KEY:
-        # The key is only ever sent as a header, never in the URL.
-        headers["X-API-Key"] = API_KEY
     req = urllib.request.Request(API_BASE + path, headers=headers)
+    if API_KEY:
+        # The key is only ever sent as a header, never in the URL, and is
+        # unredirected so urllib never copies it onto a redirect target.
+        req.add_unredirected_header("X-API-Key", API_KEY)
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as res:
-            return json.loads(res.read().decode("utf-8"))
+            payload = json.loads(res.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = ""
         try:
@@ -93,7 +94,12 @@ def get_json(path):
     except urllib.error.URLError as exc:
         raise ApiError("network error: %s" % exc.reason)
     except (ValueError, OSError) as exc:
-        raise ApiError(str(exc))
+        message = str(exc)
+        raise ApiError(message.replace(API_KEY, "***") if API_KEY else message)
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        raise ApiError(str(detail) if detail else "unexpected response")
+    return payload
 
 
 def clean(text):
@@ -129,6 +135,8 @@ def upcoming_releases(now):
     payload = get_json("/calendar/%s" % CURRENCY)
     rows = []
     for row in payload.get("data") or []:
+        if not isinstance(row, dict):
+            continue
         ts = row.get("announcement_datetime")
         if isinstance(ts, (int, float)) and ts >= now:
             rows.append(row)
@@ -173,7 +181,7 @@ def latest_values():
         except ApiError as exc:
             results.append((label, None, str(exc)))
             continue
-        if payload.get("freemium_delay", {}).get("applied"):
+        if (payload.get("freemium_delay") or {}).get("applied"):
             current = payload["freemium_delay"]
             if delay is None or current.get("withheld_count", 0) > delay.get("withheld_count", 0):
                 delay = current
@@ -181,7 +189,7 @@ def latest_values():
         if not data:
             results.append((label, None, "no recent data"))
             continue
-        row = data[0]
+        row = data[0] if isinstance(data[0], dict) else {}
         unit = (payload.get("value_metadata") or {}).get("source_unit", "")
         value = format_value(row.get("val"), unit)
         change = row.get("change_from_previous")
